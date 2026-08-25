@@ -1,0 +1,9 @@
+Metadata-Version: 2.1
+Name: hsi_analysis
+Version: 0.1
+Summary: A package for HSI data analysis and visualization
+Author: Julien Rehault
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: matplotlib
+Requires-Dist: ipywidgets
