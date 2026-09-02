@@ -2,6 +2,7 @@ import os
 import numpy as np
 from ipywidgets import Dropdown, IntSlider, Output, VBox, FloatSlider, HBox, Layout, Button
 from IPython.display import display, clear_output
+import matplotlib
 import matplotlib.pyplot as plt
 from .core import create_asymmetric_window, compute_fft, calibrate_spectrum, compute_hsi_for_voltage, compute_hsi_cube
 from .io import load_all_images, load_positions_dyn, load_calibration_dyn,load_positions_ss,load_calibration_ss
@@ -193,20 +194,19 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         print("No HSI data available")
         return
 
-    # Switch to the interactive ipympl backend so the figure updates live.
-    interactive_backend = False
-    try:
-        ip = get_ipython()
-    except NameError:
-        ip = None
-    if ip is not None:
-        try:
-            ip.run_line_magic('matplotlib', 'widget')
-            interactive_backend = True
-        except Exception as e:
-            print(f"Could not enable the ipympl ('%matplotlib widget') backend "
-                  f"({e}); falling back to a static, non-live-updating figure. "
-                  f"Install it with: pip install ipympl")
+    # This needs the ipympl ("%matplotlib widget") backend for live updates.
+    # It must be enabled by the USER, in its own cell, *before* calling this
+    # function - switching backends from inside a function call (mid-cell
+    # execution) can corrupt the ipywidgets comm state for the rest of the
+    # kernel session (breaking even unrelated widgets afterward). We only
+    # detect and report the current backend here, we don't switch it.
+    current_backend = matplotlib.get_backend().lower()
+    interactive_backend = 'ipympl' in current_backend or 'nbagg' in current_backend
+    if not interactive_backend:
+        print(f"Warning: current matplotlib backend is '{matplotlib.get_backend()}', "
+              f"not ipympl. Run '%matplotlib widget' in its own cell (before "
+              f"calling create_unified_widget) for live-updating plots. "
+              f"Falling back to a static, non-interactive figure for now.")
     plt.ioff()
 
     # Extract all Vds and Vgs values
@@ -458,14 +458,20 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         marker_artist.set_offsets([[x, y]])
         ax1.set_title(f'Image at {wavelengths[wavelength_idx]:.1f} nm (Vds={vds}V, Vgs={vgs}V)')
 
+        # Avoid a "identical low and high xlims/ylims" warning when the data
+        # (or the sliders, before autoscale runs) are genuinely flat.
+        img_lo, img_hi = img_min_slider.value, img_max_slider.value
+        if img_lo == img_hi:
+            img_hi = img_lo + 1e-6
+
         # Vertical / horizontal cuts through the image
         vertical_cut = img_data[:, x]
         vcut_line.set_data(vertical_cut, range(len(vertical_cut)))
-        ax2.set_xlim(img_min_slider.value, img_max_slider.value)
+        ax2.set_xlim(img_lo, img_hi)
 
         horizontal_cut = img_data[y, :]
         hcut_line.set_data(range(len(horizontal_cut)), horizontal_cut)
-        ax3.set_ylim(img_min_slider.value, img_max_slider.value)
+        ax3.set_ylim(img_lo, img_hi)
 
         # Spectrum
         spectrum_line.set_data(wavelengths, spectrum)
