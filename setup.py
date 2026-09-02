@@ -9,7 +9,6 @@ setup(
         'scipy',
         'matplotlib',
         'ipywidgets',
-        'ipympl',
         'ipython',
         'h5py',
     ],
