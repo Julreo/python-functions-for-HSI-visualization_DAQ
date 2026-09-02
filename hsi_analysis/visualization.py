@@ -344,7 +344,7 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         update_displays(None)
 
     def update_displays(change):
-        output.clear_output()
+        output.clear_output(wait=True)
 
         vds = vds_dropdown.value
         vgs = vgs_dropdown.value
@@ -591,7 +591,7 @@ def create_time_resolved_widget_from_data(filtered_hsi_dict, wavelengths, positi
                        x=x_slider.value, y=y_slider.value, wavelength=wavelength_slider.value,
                        img_min=img_min_slider.value, img_max=img_max_slider.value,
                        spec_min=spec_min_slider.value, spec_max=spec_max_slider.value):
-        output.clear_output()
+        output.clear_output(wait=True)
         current_key = f"{state}_FRAME_{frame}"
         hsi = filtered_hsi_dict[current_key]
         wavelength_idx = np.argmin(np.abs(wavelengths - wavelength))
@@ -694,7 +694,7 @@ def update_displays(state_dropdown, frame_dropdown, x_slider, y_slider, waveleng
                     x_min_slider, x_max_slider, img_min_slider, img_max_slider,
                     spec_min_slider, spec_max_slider, hsi_dict, wavelengths, positions, output):
     """Update all displays."""
-    output.clear_output()
+    output.clear_output(wait=True)
 
     current_key = get_current_key(state_dropdown, frame_dropdown)
     hsi = hsi_dict[current_key]
