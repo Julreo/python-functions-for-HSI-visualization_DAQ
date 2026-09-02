@@ -533,11 +533,17 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
     line3 = HBox([x_min_slider, x_max_slider, img_min_slider, img_max_slider])
     line4 = HBox([spec_min_slider, spec_max_slider, autoscale_button])
 
-    controls = VBox([line1, line2, line3, line4, status_output])
-    display(controls)
+    # Combine controls and the figure canvas into a single container and
+    # display it with one call: displaying the canvas separately (in its own
+    # display() call) can cause it to take over the cell's output area and
+    # wipe out anything displayed just before it. (Only the ipympl canvas is
+    # itself a widget; a plain Figure can't be placed inside a VBox.)
     if interactive_backend:
-        display(fig.canvas)
+        controls = VBox([line1, line2, line3, line4, status_output, fig.canvas])
+        display(controls)
     else:
+        controls = VBox([line1, line2, line3, line4, status_output])
+        display(controls)
         display(fig)
 
     autoscale(None)
