@@ -175,10 +175,39 @@ def compute_all_hsi_dyn(data_dir, ref_frames_to_average=20):
 
     
 def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
-    """Create an interactive widget for visualizing HSI data with Vds/Vgs support."""
+    """
+    Create an interactive widget for visualizing HSI data with Vds/Vgs support.
+
+    Uses the ipympl ("%matplotlib widget") backend: the figure is created once
+    and its artists are updated in place on every interaction (no re-rendering
+    a brand new static PNG into an Output widget on every slider move). This
+    avoids the flicker / duplicate-figure / "model not found" issues that the
+    old inline-backend + Output.clear_output() approach was prone to,
+    especially over higher-latency remote connections.
+
+    Requires the `ipympl` package. If it isn't available (or this isn't
+    running inside an IPython/Jupyter kernel), falls back to a static,
+    non-live-updating display and prints a warning.
+    """
     if not hsi_dict:
         print("No HSI data available")
         return
+
+    # Switch to the interactive ipympl backend so the figure updates live.
+    interactive_backend = False
+    try:
+        ip = get_ipython()
+    except NameError:
+        ip = None
+    if ip is not None:
+        try:
+            ip.run_line_magic('matplotlib', 'widget')
+            interactive_backend = True
+        except Exception as e:
+            print(f"Could not enable the ipympl ('%matplotlib widget') backend "
+                  f"({e}); falling back to a static, non-live-updating figure. "
+                  f"Install it with: pip install ipympl")
+    plt.ioff()
 
     # Extract all Vds and Vgs values
     vds_values = sorted(hsi_dict.keys(), key=float)
@@ -191,7 +220,6 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
 
     # Get dimensions from first dataset
     V_size, H_size = hsi_dict[default_vds][default_vgs].shape[1], hsi_dict[default_vds][default_vgs].shape[2]
-    first_positions = positions_dict[default_vds][default_vgs]
 
     print("\n=== Dataset Information ===")
     print(f"Vds values: {len(vds_values)} ({', '.join(vds_values)})")
@@ -313,7 +341,44 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         layout=Layout(width='200px')
     )
 
-    output = Output()
+    status_output = Output()
+
+    # --- Build the figure and all its artists ONCE ---
+    fig = plt.figure(figsize=(16, 9))
+    gs = fig.add_gridspec(2, 3, width_ratios=[1, 0.15, 1.3], height_ratios=[1, 0.15], wspace=0.3, hspace=0.3)
+
+    ax1 = fig.add_subplot(gs[0, 0])
+    img_artist = ax1.imshow(np.zeros((V_size, H_size)), cmap='gray')
+    marker_artist = ax1.scatter([default_x], [default_y], color='white', s=200, edgecolor='red', linewidth=2)
+    cbar = fig.colorbar(img_artist, ax=ax1, fraction=0.046, pad=0.04)
+
+    ax2 = fig.add_subplot(gs[0, 1], sharey=ax1)
+    (vcut_line,) = ax2.plot([], [], 'r-', linewidth=1.5)
+    ax2.set_title('Vertical')
+    ax2.grid(True, alpha=0.3)
+    ax2.invert_yaxis()
+    plt.setp(ax2.get_yticklabels(), visible=False)
+
+    ax3 = fig.add_subplot(gs[1, 0], sharex=ax1)
+    (hcut_line,) = ax3.plot([], [], 'b-', linewidth=1.5)
+    ax3.set_title('Horizontal')
+    ax3.grid(True, alpha=0.3)
+
+    gs_right = gs[:, 2].subgridspec(2, 1, height_ratios=[2, 1], hspace=0.3)
+    ax4 = fig.add_subplot(gs_right[0])
+    (spectrum_line,) = ax4.plot([], [], 'b-', linewidth=1)
+    spectrum_vline = ax4.axvline(wavelengths[0], color='red', linestyle='--', alpha=0.7)
+    ax4.grid(True, alpha=0.3)
+
+    ax5 = fig.add_subplot(gs_right[1])
+    (raw_line,) = ax5.plot([], [], 'gray', alpha=0.5, linewidth=1, label='Raw')
+    (processed_line,) = ax5.plot([], [], 'b-', linewidth=1, label='Processed')
+    (window_line,) = ax5.plot([], [], 'r--', alpha=0.5, linewidth=1, label='Window')
+    zpd_vline = ax5.axvline(0, color='g', linestyle=':', alpha=0.7, label='ZPD')
+    ax5.legend(loc='upper right', fontsize=8)
+    ax5.grid(True, alpha=0.3)
+
+    plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
 
     def autoscale(b):
         vds = vds_dropdown.value
@@ -344,8 +409,6 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         update_displays(None)
 
     def update_displays(change):
-        output.clear_output(wait=True)
-
         vds = vds_dropdown.value
         vgs = vgs_dropdown.value
         ref_vgs = ref_vgs_dropdown.value
@@ -357,8 +420,11 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         voltage_dir = os.path.join(base_dir, f'Vds={vds}V', f'Vgs={vgs}V', 'STEPS')
         images = load_all_images(voltage_dir)
         if images is None:
-            print(f"Failed to load images for Vds={vds}V/Vgs={vgs}V")
+            with status_output:
+                status_output.clear_output(wait=True)
+                print(f"Failed to load images for Vds={vds}V/Vgs={vgs}V")
             return
+        status_output.clear_output(wait=True)
 
         raw_interferogram = images[:, y, x]
         processed_interferogram = raw_interferogram - np.mean(raw_interferogram)
@@ -375,67 +441,50 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         else:
             display_mode = 'Intensity'
 
-        with output:
-            fig = plt.figure(figsize=(16, 9))
-            gs = fig.add_gridspec(2, 3, width_ratios=[1, 0.15, 1.3], height_ratios=[1, 0.15], wspace=0.3, hspace=0.3)
+        img_data = hsi[wavelength_idx, :, :].copy()
+        if ref_vgs != 'None':
+            ref_img = hsi_dict[vds][ref_vgs][wavelength_idx, :, :].copy()
+            ref_img[ref_img <= 0] = 1e-6
+            img_data[img_data <= 0] = 1e-6
+            img_data = -np.log10(img_data / ref_img)
+            cmap = 'viridis'
+        else:
+            cmap = 'gray'
 
-            # Image plot
-            ax1 = fig.add_subplot(gs[0, 0])
-            img_data = hsi[wavelength_idx, :, :].copy()
-            if ref_vgs != 'None':
-                ref_img = hsi_dict[vds][ref_vgs][wavelength_idx, :, :].copy()
-                ref_img[ref_img <= 0] = 1e-6
-                img_data[img_data <= 0] = 1e-6
-                img_data = -np.log10(img_data / ref_img)
-                img = ax1.imshow(img_data, cmap='viridis', vmin=img_min_slider.value, vmax=img_max_slider.value)
-            else:
-                img = ax1.imshow(img_data, cmap='gray', vmin=img_min_slider.value, vmax=img_max_slider.value)
-            ax1.scatter(x, y, color='white', s=200, edgecolor='red', linewidth=2)
-            fig.colorbar(img, ax=ax1, fraction=0.046, pad=0.04)
-            ax1.set_title(f'Image at {wavelengths[wavelength_idx]:.1f} nm (Vds={vds}V, Vgs={vgs}V)')
+        # Image + marker + colorbar range
+        img_artist.set_data(img_data)
+        img_artist.set_cmap(cmap)
+        img_artist.set_clim(img_min_slider.value, img_max_slider.value)
+        marker_artist.set_offsets([[x, y]])
+        ax1.set_title(f'Image at {wavelengths[wavelength_idx]:.1f} nm (Vds={vds}V, Vgs={vgs}V)')
 
-            # Vertical cut
-            ax2 = fig.add_subplot(gs[0, 1], sharey=ax1)
-            vertical_cut = img_data[:, x]
-            ax2.plot(vertical_cut, range(len(vertical_cut)), 'r-', linewidth=1.5)
-            ax2.set_xlim(img_min_slider.value, img_max_slider.value)
-            ax2.set_title('Vertical')
-            ax2.grid(True, alpha=0.3)
-            ax2.invert_yaxis()
-            plt.setp(ax2.get_yticklabels(), visible=False)
+        # Vertical / horizontal cuts through the image
+        vertical_cut = img_data[:, x]
+        vcut_line.set_data(vertical_cut, range(len(vertical_cut)))
+        ax2.set_xlim(img_min_slider.value, img_max_slider.value)
 
-            # Horizontal cut
-            ax3 = fig.add_subplot(gs[1, 0], sharex=ax1)
-            horizontal_cut = img_data[y, :]
-            ax3.plot(range(len(horizontal_cut)), horizontal_cut, 'b-', linewidth=1.5)
-            ax3.set_ylim(img_min_slider.value, img_max_slider.value)
-            ax3.set_title('Horizontal')
-            ax3.grid(True, alpha=0.3)
+        horizontal_cut = img_data[y, :]
+        hcut_line.set_data(range(len(horizontal_cut)), horizontal_cut)
+        ax3.set_ylim(img_min_slider.value, img_max_slider.value)
 
-            # Spectrum plot
-            gs_right = gs[:, 2].subgridspec(2, 1, height_ratios=[2, 1], hspace=0.3)
-            ax4 = fig.add_subplot(gs_right[0])
-            ax4.plot(wavelengths, spectrum, 'b-', linewidth=1)
-            ax4.axvline(wavelengths[wavelength_idx], color='red', linestyle='--', alpha=0.7)
-            ax4.set_ylim(spec_min_slider.value, spec_max_slider.value)
-            ax4.set_xlim(x_min_slider.value, x_max_slider.value)
-            ax4.set_title(f'{display_mode} at ({y}, {x})')
-            ax4.grid(True, alpha=0.3)
+        # Spectrum
+        spectrum_line.set_data(wavelengths, spectrum)
+        spectrum_vline.set_xdata([wavelengths[wavelength_idx], wavelengths[wavelength_idx]])
+        ax4.set_ylim(spec_min_slider.value, spec_max_slider.value)
+        ax4.set_xlim(x_min_slider.value, x_max_slider.value)
+        ax4.set_title(f'{display_mode} at ({y}, {x})')
 
-            # Interferogram plot
-            ax5 = fig.add_subplot(gs_right[1])
-            ax5.plot(positions, raw_interferogram, 'gray', alpha=0.5, linewidth=1, label='Raw')
-            ax5.plot(positions, processed_interferogram, 'b-', linewidth=1, label='Processed')
-            window_scale = max(abs(raw_interferogram)) * 0.3
-            ax5.plot(positions, window * window_scale, 'r--', alpha=0.5, linewidth=1, label='Window')
-            zpd_index = np.argmin(np.abs(positions))
-            ax5.axvline(positions[zpd_index], color='g', linestyle=':', alpha=0.7, label='ZPD')
-            ax5.legend(loc='upper right', fontsize=8)
-            ax5.grid(True, alpha=0.3)
+        # Interferogram + apodization window
+        raw_line.set_data(positions, raw_interferogram)
+        processed_line.set_data(positions, processed_interferogram)
+        window_scale = max(abs(raw_interferogram)) * 0.3
+        window_line.set_data(positions, window * window_scale)
+        zpd_index = np.argmin(np.abs(positions))
+        zpd_vline.set_xdata([positions[zpd_index], positions[zpd_index]])
+        ax5.relim()
+        ax5.autoscale_view()
 
-            plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
-            plt.show()
-            plt.close(fig)
+        fig.canvas.draw_idle()
 
     # Slider limit updates
     def update_slider_limits(change):
@@ -484,11 +533,13 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
     line3 = HBox([x_min_slider, x_max_slider, img_min_slider, img_max_slider])
     line4 = HBox([spec_min_slider, spec_max_slider, autoscale_button])
 
-    controls = VBox([line1, line2, line3, line4, output])
+    controls = VBox([line1, line2, line3, line4, status_output])
     display(controls)
+    if interactive_backend:
+        display(fig.canvas)
+    else:
+        display(fig)
 
-    # autoscale(None) already renders the initial figure internally; calling
-    # update_displays(None) again here would just duplicate that render.
     autoscale(None)
 
 def create_time_resolved_widget_from_data(filtered_hsi_dict, wavelengths, positions):
