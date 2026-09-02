@@ -3,7 +3,7 @@ import numpy as np
 from ipywidgets import Dropdown, IntSlider, Output, VBox, FloatSlider, HBox, Layout, Button
 from IPython.display import display, clear_output
 import matplotlib.pyplot as plt
-from .core import create_asymmetric_window, compute_fft, calibrate_spectrum  # Import compute_fft and calibrate_spectrum
+from .core import create_asymmetric_window, compute_fft, calibrate_spectrum, compute_hsi_for_voltage, compute_hsi_cube
 from .io import load_all_images, load_positions_dyn, load_calibration_dyn,load_positions_ss,load_calibration_ss
 
 def compute_hsi_for_frame(frame_dir, positions, calibration_data):
@@ -11,16 +11,8 @@ def compute_hsi_for_frame(frame_dir, positions, calibration_data):
     images = load_all_images(frame_dir)
     if images is None:
         return None
-
     wavelengths, pseudo_freqs = calibration_data
-    V_size, H_size = images.shape[1], images.shape[2]
-    hsi = np.empty((len(wavelengths), V_size, H_size), dtype=np.float32)
-
-    for i in range(V_size):
-        for j in range(H_size):
-            amplitude, freq_axis, _ = compute_fft(images[:, i, j], positions)
-            _, hsi[:, i, j] = calibrate_spectrum(amplitude, freq_axis, wavelengths, pseudo_freqs)
-    return hsi
+    return compute_hsi_cube(images, positions, wavelengths, pseudo_freqs)
 
 def compute_hsi_for_voltage_ss(voltage_dir, positions, calibration_data):
     """Compute HSI for a single voltage directory."""
@@ -31,63 +23,60 @@ def compute_hsi_for_voltage_ss(voltage_dir, positions, calibration_data):
         return None
 
     wavelengths, pseudo_freqs = calibration_data
-    V_size, H_size = images.shape[1], images.shape[2]
-    hsi = np.empty((len(wavelengths), V_size, H_size), dtype=np.float32)
+    return compute_hsi_cube(images, positions, wavelengths, pseudo_freqs)
 
-    for i in range(V_size):
-        for j in range(H_size):
-            amplitude, freq_axis, _ = compute_fft(images[:, i, j], positions)
-            _, hsi[:, i, j] = calibrate_spectrum(amplitude, freq_axis, wavelengths, pseudo_freqs)
-    return hsi
-
-def compute_all_hsi_ss(data_dir):  # ✅ Now accepts data_dir
-    """Main function to compute HSI for all voltages."""
-    # Load calibration data
-    calibration_data = load_calibration_ss()
+def compute_all_hsi_ss(data_dir):
+    """Compute HSI for all Vds/Vgs folders."""
+    calibration_data = load_calibration_ss(data_dir)
     if calibration_data[0] is None:
         return {}, [], {}
 
-    # Find all Vgs folders
-    vgs_folders = [f for f in os.listdir(data_dir) if f.startswith('Vgs=')]
-    if not vgs_folders:
-        print(f"No Vgs folders found in {data_dir}")
-        print(f"Contents: {os.listdir(data_dir) if os.path.exists(data_dir) else 'Directory not found'}")
+    hsi_dict = {}
+    positions_dict = {}
+
+    # Find all Vds folders
+    vds_folders = [f for f in os.listdir(data_dir) if f.startswith('Vds=')]
+    if not vds_folders:
+        print(f"No Vds folders found in {data_dir}")
         return {}, [], {}
 
-    positions_dict = {}
-    hsi_dict = {}
+    for vds_folder in vds_folders:
+        vds_dir = os.path.join(data_dir, vds_folder)
+        vds_key = vds_folder.split('=')[1].replace('V', '')
 
-    for folder in vgs_folders:
-        voltage_dir = os.path.join(data_dir, folder)
-        voltage_key = folder.split('=')[1].replace('V', '')
+        hsi_dict[vds_key] = {}
+        positions_dict[vds_key] = {}
 
-        print(f"\nProcessing {folder}...")
+        # Find all Vgs folders inside Vds
+        vgs_folders = [f for f in os.listdir(vds_dir) if f.startswith('Vgs=')]
+        for vgs_folder in vgs_folders:
+            voltage_dir = os.path.join(vds_dir, vgs_folder, "STEPS") 
+            vgs_key = vgs_folder.split('=')[1].replace('V', '')
 
-        # Load positions for this voltage
-        positions = load_positions_ss(voltage_dir)
-        if positions is None:
-            continue
+            print(f"\nProcessing {vds_folder}/{vgs_folder}...")
 
-        positions_dict[voltage_key] = positions
-
-        # Compute HSI for this voltage
-        try:
-            hsi = compute_hsi_for_voltage_ss(voltage_dir, positions, calibration_data)
-            if hsi is None:
+            positions = load_positions_ss(os.path.join(vds_dir, vgs_folder))  # Load from Vgs folder
+            if positions is None:
                 continue
 
-            hsi_dict[voltage_key] = hsi
-            print(f"Successfully processed {folder}")
-        except Exception as e:
-            print(f"Error processing {folder}: {str(e)}")
-            continue
+            positions_dict[vds_key][vgs_key] = positions
+
+            try:
+                hsi = compute_hsi_for_voltage(voltage_dir, positions, calibration_data)
+                if hsi is None:
+                    continue
+                hsi_dict[vds_key][vgs_key] = hsi
+                print(f"Successfully processed {vds_folder}/{vgs_folder}")
+            except Exception as e:
+                print(f"Error processing {vds_folder}/{vgs_folder}: {str(e)}")
+                continue
 
     if not hsi_dict:
         print("No valid data was processed")
         return {}, [], {}
 
     wavelengths = calibration_data[0]
-    return hsi_dict, wavelengths, positions_dict  
+    return hsi_dict, wavelengths, positions_dict
     
 def compute_all_hsi_dyn(data_dir, ref_frames_to_average=20):
     """Compute HSI for dynamic measurements (REF, ON, OFF frames)."""
@@ -186,40 +175,75 @@ def compute_all_hsi_dyn(data_dir, ref_frames_to_average=20):
 
     
 def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
-    """Create an interactive widget for visualizing HSI data."""
+    """Create an interactive widget for visualizing HSI data with Vds/Vgs support."""
     if not hsi_dict:
         print("No HSI data available")
         return
 
-    voltages = sorted(hsi_dict.keys(), key=float)
-    highest_voltage = voltages[-1]
-    lowest_voltage = voltages[0]
+    # Extract all Vds and Vgs values
+    vds_values = sorted(hsi_dict.keys(), key=float)
+    if not vds_values:
+        return
 
-    first_voltage = highest_voltage
-    V_size, H_size = hsi_dict[first_voltage].shape[1], hsi_dict[first_voltage].shape[2]
-    first_positions = list(positions_dict.values())[0]
+    # Default to first Vds and its first Vgs
+    default_vds = vds_values[0]
+    default_vgs = sorted(hsi_dict[default_vds].keys(), key=float)[0]
+
+    # Get dimensions from first dataset
+    V_size, H_size = hsi_dict[default_vds][default_vgs].shape[1], hsi_dict[default_vds][default_vgs].shape[2]
+    first_positions = positions_dict[default_vds][default_vgs]
 
     print("\n=== Dataset Information ===")
-    print(f"Voltages: {len(voltages)} ({', '.join(voltages)})")
+    print(f"Vds values: {len(vds_values)} ({', '.join(vds_values)})")
+    print(f"Vgs values per Vds: {', '.join(sorted(hsi_dict[default_vds].keys(), key=float))}")
     print(f"Image size: {V_size}x{H_size} pixels")
     print(f"Wavelengths: {np.min(wavelengths):.1f} to {np.max(wavelengths):.1f} nm")
 
+    # Create dropdowns for Vds and Vgs
+    vds_dropdown = Dropdown(
+        options=vds_values,
+        description='Vds (V):',
+        value=default_vds,
+        layout=Layout(width='150px')
+    )
+
+    vgs_dropdown = Dropdown(
+        options=sorted(hsi_dict[default_vds].keys(), key=float),
+        description='Vgs (V):',
+        value=default_vgs,
+        layout=Layout(width='150px')
+    )
+
+    # Update Vgs options when Vds changes
+    def update_vgs_options(*args):
+        selected_vds = vds_dropdown.value
+        if selected_vds in hsi_dict:
+            vgs_options = sorted(hsi_dict[selected_vds].keys(), key=float)
+            vgs_dropdown.options = vgs_options
+            if vgs_options:
+                vgs_dropdown.value = vgs_options[0]
+
+    vds_dropdown.observe(update_vgs_options, names='value')
+
+    # Reference dropdown (use first Vgs of selected Vds)
+    ref_vgs_dropdown = Dropdown(
+        options=['None'] + sorted(hsi_dict[default_vds].keys(), key=float),
+        description='Reference:',
+        value='None',
+        layout=Layout(width='150px')
+    )
+
+    # Update reference options when Vds changes
+    def update_ref_options(*args):
+        selected_vds = vds_dropdown.value
+        if selected_vds in hsi_dict:
+            ref_options = ['None'] + sorted(hsi_dict[selected_vds].keys(), key=float)
+            ref_vgs_dropdown.options = ref_options
+
+    vds_dropdown.observe(update_ref_options, names='value')
+
     default_x = H_size // 2
     default_y = V_size // 2
-
-    voltage_dropdown = Dropdown(
-        options=voltages,
-        description='Voltage:',
-        value=highest_voltage,
-        layout=Layout(width='200px')
-    )
-
-    ref_voltage_dropdown = Dropdown(
-        options=['None'] + voltages,
-        description='Reference:',
-        value=lowest_voltage,
-        layout=Layout(width='200px')
-    )
 
     x_slider = IntSlider(
         min=0, max=H_size - 1, value=default_x,
@@ -292,14 +316,15 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
     output = Output()
 
     def autoscale(b):
-        voltage = voltage_dropdown.value
-        ref_voltage = ref_voltage_dropdown.value
+        vds = vds_dropdown.value
+        vgs = vgs_dropdown.value
+        ref_vgs = ref_vgs_dropdown.value
         wavelength_idx = np.argmin(np.abs(wavelengths - wavelength_slider.value))
-        hsi = hsi_dict[voltage]
+        hsi = hsi_dict[vds][vgs]
 
-        img_data = hsi[wavelength_idx, :, :]
-        if ref_voltage != 'None':
-            ref_img = hsi_dict[ref_voltage][wavelength_idx, :, :]
+        img_data = hsi[wavelength_idx, :, :].copy()
+        if ref_vgs != 'None':
+            ref_img = hsi_dict[vds][ref_vgs][wavelength_idx, :, :].copy()
             ref_img[ref_img <= 0] = 1e-6
             img_data[img_data <= 0] = 1e-6
             img_data = -np.log10(img_data / ref_img)
@@ -307,9 +332,9 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
         img_max_slider.value = np.max(img_data)
 
         x, y = x_slider.value, y_slider.value
-        spectrum = hsi[:, y, x]
-        if ref_voltage != 'None':
-            ref_spectrum = hsi_dict[ref_voltage][:, y, x]
+        spectrum = hsi[:, y, x].copy()
+        if ref_vgs != 'None':
+            ref_spectrum = hsi_dict[vds][ref_vgs][:, y, x].copy()
             ref_spectrum[ref_spectrum <= 0] = 1e-6
             spectrum[spectrum <= 0] = 1e-6
             spectrum = -np.log10(spectrum / ref_spectrum)
@@ -321,27 +346,28 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
     def update_displays(change):
         output.clear_output()
 
-        voltage = voltage_dropdown.value
-        ref_voltage = ref_voltage_dropdown.value
+        vds = vds_dropdown.value
+        vgs = vgs_dropdown.value
+        ref_vgs = ref_vgs_dropdown.value
         x, y = x_slider.value, y_slider.value
         wavelength_idx = np.argmin(np.abs(wavelengths - wavelength_slider.value))
-        hsi = hsi_dict[voltage]
+        hsi = hsi_dict[vds][vgs]
 
-        positions = positions_dict[voltage]
-        voltage_dir = os.path.join(base_dir, f'Vgs={voltage}V')
+        positions = positions_dict[vds][vgs]
+        voltage_dir = os.path.join(base_dir, f'Vds={vds}V', f'Vgs={vgs}V', 'STEPS')
         images = load_all_images(voltage_dir)
         if images is None:
-            print(f"Failed to load images for {voltage}V")
+            print(f"Failed to load images for Vds={vds}V/Vgs={vgs}V")
             return
 
         raw_interferogram = images[:, y, x]
         processed_interferogram = raw_interferogram - np.mean(raw_interferogram)
         window = create_asymmetric_window(positions)
         processed_interferogram = processed_interferogram * window
-        spectrum = hsi[:, y, x]
+        spectrum = hsi[:, y, x].copy()
 
-        if ref_voltage != 'None':
-            ref_spectrum = hsi_dict[ref_voltage][:, y, x]
+        if ref_vgs != 'None':
+            ref_spectrum = hsi_dict[vds][ref_vgs][:, y, x].copy()
             ref_spectrum[ref_spectrum <= 0] = 1e-6
             spectrum[spectrum <= 0] = 1e-6
             spectrum = -np.log10(spectrum / ref_spectrum)
@@ -353,10 +379,11 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
             fig = plt.figure(figsize=(16, 9))
             gs = fig.add_gridspec(2, 3, width_ratios=[1, 0.15, 1.3], height_ratios=[1, 0.15], wspace=0.3, hspace=0.3)
 
+            # Image plot
             ax1 = fig.add_subplot(gs[0, 0])
-            img_data = hsi[wavelength_idx, :, :]
-            if ref_voltage != 'None':
-                ref_img = hsi_dict[ref_voltage][wavelength_idx, :, :]
+            img_data = hsi[wavelength_idx, :, :].copy()
+            if ref_vgs != 'None':
+                ref_img = hsi_dict[vds][ref_vgs][wavelength_idx, :, :].copy()
                 ref_img[ref_img <= 0] = 1e-6
                 img_data[img_data <= 0] = 1e-6
                 img_data = -np.log10(img_data / ref_img)
@@ -365,8 +392,9 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
                 img = ax1.imshow(img_data, cmap='gray', vmin=img_min_slider.value, vmax=img_max_slider.value)
             ax1.scatter(x, y, color='white', s=200, edgecolor='red', linewidth=2)
             fig.colorbar(img, ax=ax1, fraction=0.046, pad=0.04)
-            ax1.set_title(f'Image at {wavelengths[wavelength_idx]:.1f} nm (Vgs={voltage}V)')
+            ax1.set_title(f'Image at {wavelengths[wavelength_idx]:.1f} nm (Vds={vds}V, Vgs={vgs}V)')
 
+            # Vertical cut
             ax2 = fig.add_subplot(gs[0, 1], sharey=ax1)
             vertical_cut = img_data[:, x]
             ax2.plot(vertical_cut, range(len(vertical_cut)), 'r-', linewidth=1.5)
@@ -376,6 +404,7 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
             ax2.invert_yaxis()
             plt.setp(ax2.get_yticklabels(), visible=False)
 
+            # Horizontal cut
             ax3 = fig.add_subplot(gs[1, 0], sharex=ax1)
             horizontal_cut = img_data[y, :]
             ax3.plot(range(len(horizontal_cut)), horizontal_cut, 'b-', linewidth=1.5)
@@ -383,6 +412,7 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
             ax3.set_title('Horizontal')
             ax3.grid(True, alpha=0.3)
 
+            # Spectrum plot
             gs_right = gs[:, 2].subgridspec(2, 1, height_ratios=[2, 1], hspace=0.3)
             ax4 = fig.add_subplot(gs_right[0])
             ax4.plot(wavelengths, spectrum, 'b-', linewidth=1)
@@ -392,6 +422,7 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
             ax4.set_title(f'{display_mode} at ({y}, {x})')
             ax4.grid(True, alpha=0.3)
 
+            # Interferogram plot
             ax5 = fig.add_subplot(gs_right[1])
             ax5.plot(positions, raw_interferogram, 'gray', alpha=0.5, linewidth=1, label='Raw')
             ax5.plot(positions, processed_interferogram, 'b-', linewidth=1, label='Processed')
@@ -404,11 +435,24 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
 
             plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
             plt.show()
+            plt.close(fig)
 
-    x_min_slider.observe(lambda change: on_x_min_change(change), names='value')
-    x_max_slider.observe(lambda change: on_x_max_change(change), names='value')
-    autoscale_button.on_click(autoscale)
+    # Slider limit updates
+    def update_slider_limits(change):
+        vds = vds_dropdown.value
+        vgs = vgs_dropdown.value
+        V_size, H_size = hsi_dict[vds][vgs].shape[1], hsi_dict[vds][vgs].shape[2]
+        x_slider.max = H_size - 1
+        y_slider.max = V_size - 1
+        if x_slider.value >= H_size:
+            x_slider.value = H_size // 2
+        if y_slider.value >= V_size:
+            y_slider.value = V_size // 2
 
+    vds_dropdown.observe(update_slider_limits, names='value')
+    vgs_dropdown.observe(update_slider_limits, names='value')
+
+    # Range updates
     def on_x_min_change(change):
         if change['new'] >= x_max_slider.value:
             x_max_slider.value = change['new'] + 10
@@ -419,17 +463,13 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
             x_min_slider.value = change['new'] - 10
         update_displays(change)
 
-    line1 = HBox([voltage_dropdown, ref_voltage_dropdown])
-    line2 = HBox([x_slider, y_slider, wavelength_slider])
-    line3 = HBox([x_min_slider, x_max_slider, img_min_slider, img_max_slider])
-    line4 = HBox([spec_min_slider, spec_max_slider, autoscale_button])
+    x_min_slider.observe(on_x_min_change, names='value')
+    x_max_slider.observe(on_x_max_change, names='value')
+    autoscale_button.on_click(autoscale)
 
-    controls = VBox([line1, line2, line3, line4, output])
-
-    display(controls)
-
+    # Register all controls
     all_controls = [
-        voltage_dropdown, ref_voltage_dropdown,
+        vds_dropdown, vgs_dropdown, ref_vgs_dropdown,
         x_slider, y_slider, wavelength_slider,
         x_min_slider, x_max_slider,
         img_min_slider, img_max_slider,
@@ -438,20 +478,18 @@ def create_unified_widget(hsi_dict, wavelengths, positions_dict, base_dir):
     for control in all_controls:
         control.observe(update_displays, names='value')
 
-    def update_slider_limits(change):
-        voltage = voltage_dropdown.value
-        V_size, H_size = hsi_dict[voltage].shape[1], hsi_dict[voltage].shape[2]
-        x_slider.max = H_size - 1
-        y_slider.max = V_size - 1
-        if x_slider.value >= H_size:
-            x_slider.value = H_size // 2
-        if y_slider.value >= V_size:
-            y_slider.value = V_size // 2
+    # Initial setup
+    line1 = HBox([vds_dropdown, vgs_dropdown, ref_vgs_dropdown])
+    line2 = HBox([x_slider, y_slider, wavelength_slider])
+    line3 = HBox([x_min_slider, x_max_slider, img_min_slider, img_max_slider])
+    line4 = HBox([spec_min_slider, spec_max_slider, autoscale_button])
 
-    voltage_dropdown.observe(update_slider_limits, names='value')
+    controls = VBox([line1, line2, line3, line4, output])
+    display(controls)
 
+    # autoscale(None) already renders the initial figure internally; calling
+    # update_displays(None) again here would just duplicate that render.
     autoscale(None)
-    update_displays(None)
 
 def create_time_resolved_widget_from_data(filtered_hsi_dict, wavelengths, positions):
     """
@@ -598,6 +636,7 @@ def create_time_resolved_widget_from_data(filtered_hsi_dict, wavelengths, positi
 
             plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
             plt.show()
+            plt.close(fig)
 
     # --- Link Widgets to Update Function ---
     widgets.interact(
@@ -713,3 +752,114 @@ def update_displays(state_dropdown, frame_dropdown, x_slider, y_slider, waveleng
 
         plt.subplots_adjust(left=0.05, right=0.95, top=0.95, bottom=0.05)
         plt.show()
+        plt.close(fig)
+
+def trim_vertical_edges(hsi_dict, pixels_from_top=0, pixels_from_bottom=0):
+    """Trim pixels from the top and bottom of HSI arrays in a nested dict (Vds/Vgs)."""
+    trimmed_hsi_dict = {}
+
+    for vds_key, vgs_dict in hsi_dict.items():
+        trimmed_hsi_dict[vds_key] = {}
+        for vgs_key, hsi_array in vgs_dict.items():
+            # Get current dimensions
+            wavelengths, height, width = hsi_array.shape
+            # Calculate new vertical range
+            new_top = pixels_from_top
+            new_bottom = height - pixels_from_bottom
+            # Trim the array
+            trimmed_hsi = hsi_array[:, new_top:new_bottom, :]
+            trimmed_hsi_dict[vds_key][vgs_key] = trimmed_hsi
+
+    return trimmed_hsi_dict
+
+
+def plot_absorption_image_only(trimmed_hsi_dict, vds, vgs, ref_vgs=None,
+                             wavelength=600, img_min=-0.5, img_max=0.0,
+                             zero_pixel_vertical=28, scaling_factor=5.4,
+                             wavelengths=None):
+    """
+    Plot only the absorption image with calibrated axes and legend.
+    Works with nested HSI data: {Vds: {Vgs: hsi_array}}.
+
+    Args:
+        trimmed_hsi_dict: Nested dictionary {Vds: {Vgs: hsi_array}}
+        vds: Vds value to plot (e.g., "0.00")
+        vgs: Vgs value to plot (e.g., "-0.60")
+        ref_vgs: Reference Vgs value (use None for intensity)
+        wavelength: Wavelength in nm
+        img_min, img_max: Image color scale limits
+        zero_pixel_vertical: Pixel position for zero vertical distance
+        scaling_factor: Micrometers per pixel
+        wavelengths: Calibrated wavelength axis, as returned by compute_all_hsi_ss.
+            If omitted, falls back to an approximate 400-1700 nm linear axis
+            (inaccurate unless your calibration happens to match that range).
+
+    Returns:
+        matplotlib Figure object
+    """
+    # Validate inputs
+    if vds not in trimmed_hsi_dict:
+        raise ValueError(f"Vds {vds} not in trimmed_hsi_dict")
+    if vgs not in trimmed_hsi_dict[vds]:
+        raise ValueError(f"Vgs {vgs} not in trimmed_hsi_dict[{vds}]")
+
+    # Get HSI data for the specified Vds/Vgs
+    hsi = trimmed_hsi_dict[vds][vgs]
+
+    if wavelengths is None:
+        print("Warning: plot_absorption_image_only() called without `wavelengths`; "
+              "falling back to an approximate 400-1700 nm axis. Pass the real "
+              "calibrated `wavelengths` array (from compute_all_hsi_ss) for accurate results.")
+        wavelengths = np.linspace(400, 1700, hsi.shape[0])
+    wavelength_idx = np.argmin(np.abs(wavelengths - wavelength))
+
+    # Handle reference
+    if ref_vgs is not None:
+        if ref_vgs not in trimmed_hsi_dict[vds]:
+            raise ValueError(f"Reference Vgs {ref_vgs} not in trimmed_hsi_dict[{vds}]")
+        ref_hsi = trimmed_hsi_dict[vds][ref_vgs]
+        # Avoid division by zero
+        ref_hsi = np.where(ref_hsi <= 0, 1e-6, ref_hsi)
+        hsi = np.where(hsi <= 0, 1e-6, hsi)
+        img_data = -np.log10(hsi[wavelength_idx] / ref_hsi[wavelength_idx])
+        display_mode = 'Absorption'
+    else:
+        img_data = hsi[wavelength_idx]
+        display_mode = 'Intensity'
+
+    # Create figure
+    fig = plt.figure(figsize=(3, 5))
+    ax = fig.add_subplot(1, 1, 1)
+    height, width = img_data.shape
+
+    # Calculate calibrated axes
+    x_max_distance = (width - 1) * scaling_factor
+    y_top = (0 - zero_pixel_vertical) * scaling_factor
+    y_bottom = (height - 1 - zero_pixel_vertical) * scaling_factor
+
+    # Plot image with calibrated axes
+    img_plot = ax.imshow(
+      img_data,
+      cmap='viridis',
+      vmin=img_min,
+      vmax=img_max,
+      extent=[0, x_max_distance, y_bottom, y_top],
+      aspect=height/width,  # Natural aspect ratio (height/width in pixels)
+      origin='upper'
+    )
+
+    # Add calibration lines
+    ax.axhline(y=0, color='gray', linestyle='-', alpha=0.8, linewidth=2.5)
+    ax.axhline(y=560, color='gray', linestyle='-', alpha=0.8, linewidth=2.5)
+    ax.fill_between([0, x_max_distance], -scaling_factor, 560, color='red', alpha=0.1)
+
+    # Add labels
+    ax.set_xlabel(f'width (μm)')
+    ax.set_ylabel(f'Distance from Drain (μm)')
+    ax.set_title(f'{display_mode} at {wavelength:.1f} nm\n(Vds={vds}V, Vgs={vgs}V, Ref={ref_vgs}V)')
+
+    # Add colorbar
+    plt.colorbar(img_plot, ax=ax, fraction=0.046, pad=0.04)
+
+    plt.tight_layout()
+    return fig

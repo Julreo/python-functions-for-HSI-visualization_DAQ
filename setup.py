@@ -9,6 +9,8 @@ setup(
         'scipy',
         'matplotlib',
         'ipywidgets',
+        'ipython',
+        'h5py',
     ],
     author="Julien Rehault",
     description="A package for HSI data analysis and visualization",
